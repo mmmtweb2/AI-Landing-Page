@@ -78,7 +78,14 @@ app.get('/l/:page_id', async (req, res) => {
 
 // --- הפעלת השרת ---
 connectDB().then(() => {
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);
     });
+
+    // **תיקון קריטי: הגדלת Timeout ל-10 דקות** (600,000 מילישניות)
+    // זה מונע מהשרת לנתק את החיבור בזמן ש-Claude עובד.
+    server.timeout = 600000;
+
+    // הגדרת Timeout גם לשקעים
+    server.keepAliveTimeout = 600000;
 });

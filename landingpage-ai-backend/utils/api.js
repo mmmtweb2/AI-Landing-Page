@@ -61,7 +61,7 @@ router.post('/generate', async (req, res) => {
             console.log(`🤖 Starting AI generation attempt #${attempt}`);
 
             const response = await anthropic.messages.create({
-                model: "claude-3-5-sonnet-20241022", // מודל Sonnet מומלץ ליציבות ומהירות
+                model: "claude-3-sonnet-20240229", // מודל Sonnet יציב ומומלץ
                 max_tokens: 4096,
                 messages: messages, // שולח את ההקשר המלא (כולל תיקון אם קיים)
             });
