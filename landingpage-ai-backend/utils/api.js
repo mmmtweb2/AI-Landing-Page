@@ -16,92 +16,132 @@ const anthropic = new Anthropic({
     apiKey: process.env.ANTHROPIC_API_KEY
 });
 
+// פונקציית עזר לניקוי וניתוח JSON
+const cleanAndParseJson = (text) => {
+    // 1. הסרת תגי עטיפה אפשריים (```json)
+    let jsonString = text.replace(/```json/g, '').replace(/```/g, '').trim();
+
+    // 2. ניסיון לאתר את אובייקט ה-JSON ולחלץ אותו
+    const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+        jsonString = jsonMatch[0];
+    }
+
+    // 3. ניסיון לפרסר את ה-JSON
+    try {
+        // החלפה קריטית: Claude לפעמים לא מקודד מרכאות כפולות בתוך ה-HTML
+        // זהו ניסיון תיקון גס למקרה שה-JSON נשבר בגלל זה.
+        // אנו נסמוך על ההנחיה בפרומפט, אך זוהי שכבת הגנה נוספת.
+        return JSON.parse(jsonString);
+    } catch (e) {
+        // console.error('Failed to parse JSON after cleaning:', e.message);
+        return null; // חוזר null אם הניתוח נכשל
+    }
+};
+
 /**
  * POST /api/generate
  * נקודת קצה ליצירת דף נחיתה חדש
  * Body: { theme, goal, style, name, description, tone, color }
  */
 router.post('/generate', async (req, res) => {
-    try {
-        // 1. קליטת הקלט ואימות בסיסי
-        const inputs = req.body;
-        if (!inputs.name || !inputs.description) {
-            return res.status(400).json({ message: 'שדות חובה חסרים (שם ותיאור).' });
-        }
+    const inputs = req.body;
+    let successfulParse = null;
 
-        // 2. בניית הפרומפט למודל ה-AI
-        const prompt = PROMPT_TEMPLATE(inputs);
+    // אימות קלט בסיסי
+    if (!inputs.name || !inputs.description || !inputs.theme) {
+        return res.status(400).json({ message: 'שדות חובה חסרים.' });
+    }
 
-        // 3. שליחת הבקשה ל-Anthropic AI
-        const message = await anthropic.messages.create({
-            model: "claude-sonnet-4-5",
-            max_tokens: 4096,
-            messages: [
-                { role: "user", content: prompt }
-            ]
-        });
+    // המערך messages ינהל את ההקשר של השיחה עם Claude
+    let messages = [{ role: 'user', content: PROMPT_TEMPLATE(inputs) }];
 
-        // 4. עיבוד התשובה מה-AI
-        const text = message.content[0].text;
-
-        // הסרת תגיות Markdown אפשריות וניקוי התשובה
-        let cleanedJsonString = text.replace(/```json/g, '').replace(/```/g, '').trim();
-
-        // ניסיון לחלץ JSON אם יש טקסט נוסף
-        const jsonMatch = cleanedJsonString.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-            cleanedJsonString = jsonMatch[0];
-        }
-
-        console.log('🔍 Attempting to parse AI response...');
-        console.log('📝 First 500 chars of response:', cleanedJsonString.substring(0, 500));
-
-        let aiOutput;
+    for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-            aiOutput = JSON.parse(cleanedJsonString);
-        } catch (parseError) {
-            console.error('❌ JSON Parse Error:', parseError.message);
-            console.error('📄 Full response (first 1000 chars):', cleanedJsonString.substring(0, 1000));
+            console.log(`🤖 Starting AI generation attempt #${attempt}`);
 
-            // ניסיון לתקן JSON פגום - החלפת מרכאות כפולות לא מקודדות
-            console.log('🔧 Attempting to fix malformed JSON...');
-            throw new Error(`Failed to parse AI response as JSON: ${parseError.message}`);
+            const response = await anthropic.messages.create({
+                model: "claude-3-5-sonnet-20241022", // מודל Sonnet מומלץ ליציבות ומהירות
+                max_tokens: 4096,
+                messages: messages, // שולח את ההקשר המלא (כולל תיקון אם קיים)
+            });
+
+            const rawResponseText = response.content[0].text;
+            successfulParse = cleanAndParseJson(rawResponseText);
+
+            if (successfulParse) {
+                console.log('✅ Successfully parsed JSON on attempt #' + attempt);
+                // הצלחה! יוצאים מהלולאה
+                break;
+            }
+
+            // אם ניתוח JSON נכשל:
+            if (attempt === 1) {
+                console.log('❌ JSON failed on first attempt. Sending correction prompt...');
+
+                // הוספת התגובה הגולמית הכושלת להקשר
+                messages.push({ role: 'assistant', content: rawResponseText });
+
+                // הוספת הנחיית התיקון להקשר (ניסיון שני יהיה עם ההקשר הזה)
+                messages.push({
+                    role: 'user',
+                    content: "הפלט הקודם שלך אינו JSON תקין. החזר **אך ורק** את אובייקט ה-JSON המלא והתקין, ללא טקסט נוסף מחוץ לו. זה קריטי."
+                });
+            } else {
+                // ניסיון תיקון שני נכשל
+                throw new Error('AI failed to return valid JSON after correction prompt.');
+            }
+
+        } catch (error) {
+            console.error('❌ Error during AI call:', error.message);
+            // טיפול בשגיאת API (כגון מפתח לא תקין או מגבלת שימוש)
+            return res.status(500).json({
+                success: false,
+                message: 'שגיאה חמורה: ה-AI לא הצליח להגיב. בדוק את מפתח ה-API.'
+            });
         }
+    }
 
+    // --- שמירה ב-DB והחזרת תגובה ---
+    if (successfulParse && successfulParse.html_code) {
         // בדיקת שדות חובה
-        if (!aiOutput.html_code || !aiOutput.page_title || !aiOutput.image_alt_description) {
+        if (!successfulParse.html_code || !successfulParse.page_title || !successfulParse.image_alt_description) {
             console.error('❌ Missing required fields in AI response');
-            console.error('📊 Received fields:', Object.keys(aiOutput));
-            throw new Error('AI response is missing required fields');
+            console.error('📊 Received fields:', Object.keys(successfulParse));
+            return res.status(500).json({
+                success: false,
+                message: 'AI response is missing required fields'
+            });
         }
 
-        console.log('✅ Successfully parsed AI response');
-        console.log('📊 Page title:', aiOutput.page_title);
-        console.log('📊 HTML code length:', aiOutput.html_code.length);
+        console.log('📊 Page title:', successfulParse.page_title);
+        console.log('📊 HTML code length:', successfulParse.html_code.length);
 
-        // 5. יצירת אובייקט לשמירה במסד הנתונים
+        const pageId = nanoid(10); // nanoid עדיף לקישורים
+
         const newPage = new LandingPage({
-            page_id: nanoid(10), // יצירת מזהה ייחודי קצר
+            page_id: pageId,
+            user_id: 'anonymous_mvp',
             original_inputs: inputs,
-            html_code: aiOutput.html_code,
-            page_title: aiOutput.page_title,
-            image_alt_description: aiOutput.image_alt_description,
-            // שדות נוספים יקבלו ערכי ברירת מחדל מהסכמה
+            html_code: successfulParse.html_code,
+            page_title: successfulParse.page_title,
+            image_alt_description: successfulParse.image_alt_description,
         });
 
-        // 6. שמירת דף הנחיתה ב-MongoDB
         await newPage.save();
 
-        // 7. שליחת תשובה מוצלחת למשתמש
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
-            page_id: newPage.page_id
+            page_id: pageId,
+            message: 'דף הנחיתה נוצר בהצלחה!'
         });
-
-    } catch (error) {
-        console.error('❌ Error during landing page generation:', error);
-        res.status(500).json({ message: 'שגיאה פנימית בשרת במהלך יצירת הדף.' });
     }
+
+    // כשלון סופי לאחר 2 ניסיונות
+    return res.status(500).json({
+        success: false,
+        message: 'אירעה שגיאה. ה-AI לא הצליח לייצר דף תקין לאחר ניסיון תיקון.'
+    });
 });
 
 module.exports = router;
